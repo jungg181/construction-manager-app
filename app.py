@@ -646,7 +646,8 @@ def clock_confirm(token):
     rec = _valid_token(token)
     if not rec:
         return render_template('clock.html', error='This QR code has expired.'), 410
-    worker_id = request.form.get('worker_id')
+    vals = [v for v in request.form.getlist('worker_id') if v]
+    worker_id = vals[0] if vals else None
     lat = request.form.get('lat') or None
     lng = request.form.get('lng') or None
     w = find('workers', worker_id)
@@ -673,10 +674,18 @@ def onsite():
     return render_template('onsite.html', trades=TRADES)
 
 
+def _phone_match(a, b):
+    """Lenient phone match: same digits, or one ends with the other
+    (handles missing/extra country codes)."""
+    if len(a) < 6 or len(b) < 6:
+        return False
+    return a == b or a.endswith(b) or b.endswith(a)
+
+
 @app.route('/api/register-worker', methods=['POST'])
 def api_register_worker():
     """Self-registration from a worker's own phone. Matches on normalized
-    phone so a reinstall doesn't create a duplicate."""
+    phone (or email) so a reinstall doesn't create a duplicate."""
     d = request.get_json(force=True)
     name = (d.get('name') or '').strip()
     phone = (d.get('phone') or '').strip()
@@ -684,11 +693,25 @@ def api_register_worker():
         return jsonify({'ok': False,
                         'error': 'Name and mobile phone are required.'}), 400
     norm = ''.join(c for c in phone if c.isdigit())
-    for w in DB['workers']:
-        wnorm = ''.join(c for c in (w.get('phone') or '') if c.isdigit())
-        if wnorm and wnorm == norm:
-            return jsonify({'ok': True, 'worker_id': w['id'],
-                            'worker_name': w['name'], 'existing': True})
+    email = (d.get('email') or '').strip().lower()
+    w = None
+    for cand in DB['workers']:
+        wnorm = ''.join(c for c in (cand.get('phone') or '') if c.isdigit())
+        if _phone_match(wnorm, norm):
+            w = cand
+            break
+    if not w and email and '@' in email:
+        for cand in DB['workers']:
+            if (cand.get('email') or '').strip().lower() == email:
+                w = cand
+                break
+    if w:
+        # Returning worker: fill in anything new they provided.
+        if email and '@' in email and not w.get('email'):
+            w['email'] = email
+            save_db()
+        return jsonify({'ok': True, 'worker_id': w['id'],
+                        'worker_name': w['name'], 'existing': True})
     trade = (d.get('trade') or '').strip() or 'Other'
     emp = (d.get('employment_type') or '').strip()
     if emp not in EMP_TYPES:
@@ -696,7 +719,7 @@ def api_register_worker():
     w = {
         'id': new_id(),
         'name': name,
-        'email': '',
+        'email': email if email and '@' in email else '',
         'phone': phone,
         'trade': trade,
         'employment_type': emp,
@@ -712,6 +735,35 @@ def api_register_worker():
     save_db()
     return jsonify({'ok': True, 'worker_id': w['id'],
                     'worker_name': w['name'], 'existing': False})
+
+
+@app.route('/api/worker-lookup')
+def api_worker_lookup():
+    """Find an active worker by registered mobile phone or email.
+    Used at clock-in so workers don't have to scroll the name list."""
+    q = (request.args.get('q') or '').strip()
+    w = None
+    if '@' in q:
+        em = q.lower()
+        for cand in DB['workers']:
+            if (cand.get('email') or '').strip().lower() == em:
+                w = cand
+                break
+    else:
+        digits = ''.join(c for c in q if c.isdigit())
+        for cand in DB['workers']:
+            wnorm = ''.join(c for c in (cand.get('phone') or '')
+                            if c.isdigit())
+            if _phone_match(wnorm, digits):
+                w = cand
+                break
+    if not w or w.get('status') != 'active':
+        return jsonify({'ok': False,
+                        'error': 'No worker found with that phone or email. '
+                                 'Check the spelling or ask your supervisor '
+                                 'to add you first.'}), 404
+    return jsonify({'ok': True, 'worker': {'id': w['id'], 'name': w['name'],
+                                           'trade': w.get('trade', '')}})
 
 
 @app.route('/api/qr-info/<token>')

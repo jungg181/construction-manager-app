@@ -47,6 +47,7 @@ const workerSelect = document.getElementById('worker-select');
 const workerHidden = document.getElementById('worker-id-hidden');
 const confirmBtn = document.getElementById('confirm-btn');
 const namePick = document.getElementById('name-pick');
+const EMAIL_KEY = 'clock_worker_email';
 function setWorker(id, label){
   workerSelect.value = '';
   workerHidden.value = id;
@@ -56,7 +57,7 @@ function setWorker(id, label){
     ? `<div class="msg ok" style="margin:0">👷 <b>${label}</b><br><a href="#" id="lookup-clear" style="font-size:.8rem">Not me? Use someone else</a></div>`
     : '';
   const clear = document.getElementById('lookup-clear');
-  if (clear) clear.onclick = e => { e.preventDefault(); workerHidden.value=''; confirmBtn.disabled = true; namePick.style.display=''; lookupResult.innerHTML=''; lookupQ.value=''; };
+  if (clear) clear.onclick = e => { e.preventDefault(); localStorage.removeItem(EMAIL_KEY); workerHidden.value=''; confirmBtn.disabled = true; namePick.style.display=''; lookupResult.innerHTML=''; lookupQ.value=''; };
 }
 async function lookupWorker(){
   const q = lookupQ.value.trim();
@@ -68,8 +69,10 @@ async function lookupWorker(){
     const d = await r.json();
     if (r.ok && d.ok) {
       const w = d.worker;
+      if (q.includes('@')) localStorage.setItem(EMAIL_KEY, q);
       setWorker(w.id, w.name + (w.trade ? ' · ' + w.trade : ''));
     } else {
+      localStorage.removeItem(EMAIL_KEY);
       workerHidden.value = ''; confirmBtn.disabled = true; namePick.style.display = '';
       lookupResult.innerHTML = `<div class="msg err" style="margin:0">${d.error || 'Worker not found.'}</div>`;
     }
@@ -84,6 +87,12 @@ workerSelect.addEventListener('change', () => {
   confirmBtn.disabled = !workerSelect.value;
   if (workerSelect.value) lookupResult.innerHTML = '';
 });
+// Auto-link: if this browser remembered a registered email from a
+// previous clock-in/out, resolve it automatically.
+(function autoLink(){
+  const saved = localStorage.getItem(EMAIL_KEY);
+  if (saved) { lookupQ.value = saved; lookupWorker(); }
+})();
 </script>
   </div></div>
 <script>

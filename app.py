@@ -91,6 +91,8 @@ def load_db():
     for c in COLLECTIONS:
         db.setdefault(c, [])
     db.setdefault('live_locations', {})  # worker_id -> {lat, lng, at, accuracy}
+    for w in db.get('workers', []):
+        w.setdefault('self_registered', False)
     return db
 
 
@@ -668,8 +670,48 @@ def clock_confirm(token):
 
 @app.route('/onsite')
 def onsite():
-    active_workers = [w for w in DB['workers'] if w.get('status') == 'active']
-    return render_template('onsite.html', workers=active_workers)
+    return render_template('onsite.html', trades=TRADES)
+
+
+@app.route('/api/register-worker', methods=['POST'])
+def api_register_worker():
+    """Self-registration from a worker's own phone. Matches on normalized
+    phone so a reinstall doesn't create a duplicate."""
+    d = request.get_json(force=True)
+    name = (d.get('name') or '').strip()
+    phone = (d.get('phone') or '').strip()
+    if not name or not phone:
+        return jsonify({'ok': False,
+                        'error': 'Name and mobile phone are required.'}), 400
+    norm = ''.join(c for c in phone if c.isdigit())
+    for w in DB['workers']:
+        wnorm = ''.join(c for c in (w.get('phone') or '') if c.isdigit())
+        if wnorm and wnorm == norm:
+            return jsonify({'ok': True, 'worker_id': w['id'],
+                            'worker_name': w['name'], 'existing': True})
+    trade = (d.get('trade') or '').strip() or 'Other'
+    emp = (d.get('employment_type') or '').strip()
+    if emp not in EMP_TYPES:
+        emp = 'Contract'
+    w = {
+        'id': new_id(),
+        'name': name,
+        'email': '',
+        'phone': phone,
+        'trade': trade,
+        'employment_type': emp,
+        'hourly_rate': 0.0,
+        'site_id': None,
+        'status': 'active',
+        'emergency_contact': '',
+        'photo_url': '',
+        'self_registered': True,
+        'created_at': now_iso(),
+    }
+    DB['workers'].append(w)
+    save_db()
+    return jsonify({'ok': True, 'worker_id': w['id'],
+                    'worker_name': w['name'], 'existing': False})
 
 
 @app.route('/api/qr-info/<token>')

@@ -29,13 +29,20 @@ Then open http://localhost:5000
 
 A mobile-first page for field workers (open it on the phone's browser):
 
-1. Worker picks their name once — it is remembered on that phone.
+1. Worker **self-registers once** on their own phone: full name, mobile phone,
+   trade, employment type. The phone is matched by normalized phone number, so
+   reinstalling the app re-links to the same worker record instead of making a
+   duplicate. The phone remembers the worker afterwards (localStorage).
 2. Taps **Scan QR** and points the camera at the supervisor's Attendance QR
    (in-page scanner; if the camera is blocked, the code can be pasted manually).
 3. A confirm card shows the site + Clock In/Out action; Confirm captures GPS
    and posts the timecard.
 4. **Share my live location** toggle (off by default, only enabled while
    clocked in) sends the phone's position to the server every 60 seconds.
+5. "Switch worker" in the header clears the phone's registration.
+
+Workers who registered themselves show a purple **Self** badge in the admin
+Workers list; admins can still register/edit/delete any worker as before.
    Sharing stops automatically on clock-out.
 5. "My timecards" shows the last 7 days.
 

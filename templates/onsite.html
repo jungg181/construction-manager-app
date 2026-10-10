@@ -34,22 +34,37 @@
 <div class="onsite-head">
   <h1>📍 On Site</h1>
   <p>Construction Manager · Worker App</p>
+  <p id="head-worker" class="hidden" style="margin:6px 0 0;font-size:.85rem">👷 <b id="head-worker-name"></b> · <a href="#" id="switch-link" style="color:#93c5fd">Switch worker</a></p>
 </div>
 
 <main class="container narrow">
   <div id="flash"></div>
 
-  <div class="card" style="margin-top:12px"><div class="card-body">
-    <label><b>Who are you?</b>
-      <select id="worker-select">
-        <option value="">— Select your name —</option>
-        {% for w in workers %}<option value="{{ w.id }}">{{ w.name }} ({{ w.trade }})</option>{% endfor %}
-      </select>
+  <div class="card" id="register-card" style="margin-top:12px"><div class="card-body">
+    <h3 style="margin-top:0">Register your phone</h3>
+    <p class="muted small">Enter your details once — this phone will remember you.</p>
+    <label><b>Full name</b>
+      <input type="text" id="reg-name" placeholder="e.g. Alex Rivera" style="width:100%" autocomplete="name">
     </label>
+    <label><b>Mobile phone</b>
+      <input type="tel" id="reg-phone" placeholder="e.g. +1 480 555 0101" style="width:100%" autocomplete="tel">
+    </label>
+    <label><b>Trade</b>
+      <input type="text" id="reg-trade" list="trade-list" placeholder="e.g. Electrician" style="width:100%">
+      <datalist id="trade-list">
+        {% for t in trades %}<option value="{{ t }}">{% endfor %}
+      </datalist>
+    </label>
+    <label><b>Employment type</b>
+      <select id="reg-emp"><option>Contract</option><option>Direct Team</option></select>
+    </label>
+    <button class="btn primary scan-btn" onclick="registerWorker()">Register</button>
+    <div id="reg-msg"></div>
   </div></div>
 
-  <div class="card" style="margin-top:10px"><div class="card-body" id="status-card">
-    <div class="muted">Select your name to see your status.</div>
+  <div id="main-app" class="hidden">
+  <div class="card" style="margin-top:12px"><div class="card-body" id="status-card">
+    <div class="muted">Loading your status...</div>
   </div></div>
 
   <button class="btn primary scan-btn" id="scan-btn" onclick="startScan()">📷 Scan QR</button>
@@ -87,14 +102,16 @@
 
   <div class="card" style="margin-top:10px"><div class="card-body">
     <h3 style="margin-top:0">My timecards <span class="muted small">(last 7 days)</span></h3>
-    <div id="tc-list"><div class="muted">Select your name first.</div></div>
+    <div id="tc-list"><div class="muted">Loading...</div></div>
   </div></div>
+  </div><!-- /main-app -->
 </main>
 
 <script src="https://unpkg.com/html5-qrcode"></script>
 <script>
 const $ = id => document.getElementById(id);
 const LS_KEY = 'onsite_worker_id';
+const NAME_KEY = 'onsite_worker_name';
 let pendingToken = null, scanner = null, locTimer = null, curWorker = null;
 
 function msg(html, kind){
@@ -102,21 +119,73 @@ function msg(html, kind){
   setTimeout(()=>{ $('flash').innerHTML=''; }, 6000);
 }
 function workerName(){
-  const s = $('worker-select');
-  return s.options[s.selectedIndex] ? s.options[s.selectedIndex].text : '';
+  return localStorage.getItem(NAME_KEY) || '';
 }
 
-function initWorker(){
-  const saved = localStorage.getItem(LS_KEY);
-  if (saved) $('worker-select').value = saved;
-  curWorker = $('worker-select').value || null;
-  if (curWorker) refreshAll();
+function showRegister(){
+  stopLocSharing(); stopScan(); cancelConfirm();
+  curWorker = null;
+  $('register-card').classList.remove('hidden');
+  $('main-app').classList.add('hidden');
+  $('head-worker').classList.add('hidden');
 }
-$('worker-select').onchange = () => {
-  stopLocSharing();
-  curWorker = $('worker-select').value || null;
-  localStorage.setItem(LS_KEY, curWorker || '');
+
+function enterMain(id, name){
+  curWorker = id;
+  localStorage.setItem(LS_KEY, id);
+  localStorage.setItem(NAME_KEY, name);
+  $('head-worker-name').textContent = name;
+  $('head-worker').classList.remove('hidden');
+  $('register-card').classList.add('hidden');
+  $('main-app').classList.remove('hidden');
   refreshAll();
+}
+
+async function initWorker(){
+  const saved = localStorage.getItem(LS_KEY);
+  if (saved) {
+    const r = await fetch('/api/worker-status/' + saved);
+    if (r.ok) {
+      const d = await r.json();
+      enterMain(saved, d.worker_name);
+      return;
+    }
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(NAME_KEY);
+  }
+  showRegister();
+}
+
+function regMsg(html, kind){
+  $('reg-msg').innerHTML = html ? `<div class="msg ${kind}">${html}</div>` : '';
+}
+
+async function registerWorker(){
+  const name = $('reg-name').value.trim();
+  const phone = $('reg-phone').value.trim();
+  if (!name || !phone) { regMsg('Name and mobile phone are required.', 'err'); return; }
+  regMsg('Registering...', 'info');
+  try {
+    const r = await fetch('/api/register-worker', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name: name, phone: phone,
+        trade: $('reg-trade').value.trim(),
+        employment_type: $('reg-emp').value})});
+    const d = await r.json();
+    if (!r.ok || !d.ok) { regMsg(d.error || 'Registration failed.', 'err'); return; }
+    regMsg('', '');
+    enterMain(d.worker_id, d.worker_name);
+    msg(d.existing ? 'Welcome back, ' + d.worker_name + '!' : 'Registered! You can now scan QR codes.', 'ok');
+  } catch(e) {
+    regMsg('Network error — try again.', 'err');
+  }
+}
+
+$('switch-link').onclick = e => {
+  e.preventDefault();
+  localStorage.removeItem(LS_KEY);
+  localStorage.removeItem(NAME_KEY);
+  showRegister();
 };
 
 async function refreshAll(){
@@ -127,7 +196,14 @@ async function refreshAll(){
 
 async function refreshStatus(){
   const r = await fetch('/api/worker-status/' + curWorker);
-  if (!r.ok) return;
+  if (!r.ok) {
+    // worker may have been deleted by the admin — back to registration
+    curWorker = null;
+    localStorage.removeItem(LS_KEY);
+    localStorage.removeItem(NAME_KEY);
+    showRegister();
+    return;
+  }
   const d = await r.json();
   const c = $('status-card');
   if (d.clocked_in) {

@@ -43,6 +43,7 @@
   <div class="avatar">{{ w.name[:1] }}</div>
   <div class="grow">
     <div><b>{{ w.name }}</b>
+      {% if w.self_registered %}<span class="pill pill-self">Self</span>{% endif %}
       <span class="pill {% if w.clocked_in %}pill-active{% elif w.status=='active' %}pill-idle{% else %}pill-{{ w.status }}{% endif %}">
         {% if w.clocked_in %}Clocked In{% else %}{{ w.status.replace('_',' ').title() }}{% endif %}
       </span>

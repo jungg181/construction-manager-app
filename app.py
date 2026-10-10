@@ -694,6 +694,9 @@ def api_register_worker():
                         'error': 'Name and mobile phone are required.'}), 400
     norm = ''.join(c for c in phone if c.isdigit())
     email = (d.get('email') or '').strip().lower()
+    if not email or '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+        return jsonify({'ok': False,
+                        'error': 'A valid email address is required.'}), 400
     w = None
     for cand in DB['workers']:
         wnorm = ''.join(c for c in (cand.get('phone') or '') if c.isdigit())
@@ -706,8 +709,8 @@ def api_register_worker():
                 w = cand
                 break
     if w:
-        # Returning worker: fill in anything new they provided.
-        if email and '@' in email and not w.get('email'):
+        # Returning worker: fill in the email if it's missing.
+        if not w.get('email'):
             w['email'] = email
             save_db()
         return jsonify({'ok': True, 'worker_id': w['id'],
@@ -719,7 +722,7 @@ def api_register_worker():
     w = {
         'id': new_id(),
         'name': name,
-        'email': email if email and '@' in email else '',
+        'email': email,
         'phone': phone,
         'trade': trade,
         'employment_type': emp,

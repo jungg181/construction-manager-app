@@ -49,6 +49,9 @@
     <label><b>Mobile phone</b>
       <input type="tel" id="reg-phone" placeholder="e.g. +1 480 555 0101" style="width:100%" autocomplete="tel">
     </label>
+    <label><b>Email</b> <span class="muted small">(optional — for finding you at clock-in)</span>
+      <input type="email" id="reg-email" placeholder="you@example.com" style="width:100%" autocomplete="email">
+    </label>
     <label><b>Trade</b>
       <input type="text" id="reg-trade" list="trade-list" placeholder="e.g. Electrician" style="width:100%">
       <datalist id="trade-list">
@@ -169,6 +172,7 @@ async function registerWorker(){
     const r = await fetch('/api/register-worker', {method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name: name, phone: phone,
+        email: $('reg-email').value.trim(),
         trade: $('reg-trade').value.trim(),
         employment_type: $('reg-emp').value})});
     const d = await r.json();

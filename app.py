@@ -90,6 +90,7 @@ def load_db():
         db = json.load(f)
     for c in COLLECTIONS:
         db.setdefault(c, [])
+    db.setdefault('live_locations', {})  # worker_id -> {lat, lng, at, accuracy}
     return db
 
 
@@ -423,7 +424,8 @@ def api_personnel():
             continue
         if t.get('clock_in_lat') in (None, ''):
             continue
-        out.append({'worker': worker_name(t['worker_id']),
+        out.append({'worker_id': t['worker_id'],
+                    'worker': worker_name(t['worker_id']),
                     'lat': t['clock_in_lat'], 'lng': t['clock_in_lng'],
                     'since': fmt_dt(t.get('clock_in'))})
     return jsonify(out)
@@ -602,6 +604,41 @@ def clock_page(token):
                            workers=active_workers, error=None)
 
 
+def _perform_clock(site_id, action, worker_id, lat, lng):
+    """Shared clock-in/out engine used by both the /clock page and the
+    On Site worker app API. Returns (ok, info dict)."""
+    w = find('workers', worker_id)
+    if not w:
+        return False, {'error': 'Worker not found.'}
+    now = now_iso()
+    if action == 'clock_in':
+        if open_timecard(worker_id):
+            return False, {'error': f"{w['name']} is already clocked in.",
+                           'already_in': True}
+        t = {'id': new_id(), 'worker_id': worker_id, 'site_id': site_id,
+             'clock_in': now, 'clock_in_lat': lat, 'clock_in_lng': lng,
+             'clock_out': None, 'clock_out_lat': None, 'clock_out_lng': None,
+             'hours': 0.0, 'status': 'clocked_in', 'notes': 'QR clock-in'}
+        DB['timecards'].append(t)
+        save_db()
+        return True, {'action': 'clock_in', 'site_id': site_id,
+                      'site_name': site_name(site_id), 'worker_name': w['name'],
+                      'clock_in': now, 'clock_out': None, 'hours': 0.0}
+    t = open_timecard(worker_id, site_id) or open_timecard(worker_id)
+    if not t:
+        return False, {'error': f"No open shift found for {w['name']}."}
+    t['clock_out'] = now
+    t['clock_out_lat'] = lat
+    t['clock_out_lng'] = lng
+    t['hours'] = compute_hours(t['clock_in'], now)
+    t['status'] = 'clocked_out'
+    save_db()
+    return True, {'action': 'clock_out', 'site_id': t['site_id'],
+                  'site_name': site_name(t['site_id']), 'worker_name': w['name'],
+                  'clock_in': t['clock_in'], 'clock_out': now,
+                  'hours': t['hours']}
+
+
 @app.route('/clock/<token>/confirm', methods=['POST'])
 def clock_confirm(token):
     rec = _valid_token(token)
@@ -614,35 +651,151 @@ def clock_confirm(token):
     if not w:
         flash('Worker not found.')
         return redirect(url_for('clock_page', token=token))
-    now = now_iso()
-    if rec['action'] == 'clock_in':
-        if open_timecard(worker_id):
-            return render_template('clock_done.html', message=f"{w['name']} is already clocked in.",
-                                   site=site_name(rec['site_id']))
-        t = {'id': new_id(), 'worker_id': worker_id, 'site_id': rec['site_id'],
-             'clock_in': now, 'clock_in_lat': lat, 'clock_in_lng': lng,
-             'clock_out': None, 'clock_out_lat': None, 'clock_out_lng': None,
-             'hours': 0.0, 'status': 'clocked_in', 'notes': 'QR clock-in'}
-        DB['timecards'].append(t)
-        save_db()
-        return render_template('clock_done.html',
-                               message=f"{w['name']} clocked in at {site_name(rec['site_id'])}.",
-                               site=site_name(rec['site_id']))
-    else:
-        t = open_timecard(worker_id, rec['site_id']) or open_timecard(worker_id)
-        if not t:
+    ok, info = _perform_clock(rec['site_id'], rec['action'], worker_id, lat, lng)
+    if ok:
+        if rec['action'] == 'clock_in':
             return render_template('clock_done.html',
-                                   message=f"No open shift found for {w['name']}.",
+                                   message=f"{w['name']} clocked in at {site_name(rec['site_id'])}.",
                                    site=site_name(rec['site_id']))
-        t['clock_out'] = now
-        t['clock_out_lat'] = lat
-        t['clock_out_lng'] = lng
-        t['hours'] = compute_hours(t['clock_in'], now)
-        t['status'] = 'clocked_out'
-        save_db()
         return render_template('clock_done.html',
-                               message=f"{w['name']} clocked out. Shift: {t['hours']}h (pending approval).",
+                               message=f"{w['name']} clocked out. Shift: {info['hours']}h (pending approval).",
                                site=site_name(rec['site_id']))
+    return render_template('clock_done.html', message=info['error'],
+                           site=site_name(rec['site_id']))
+
+
+# ================= ON SITE WORKER APP =================
+
+@app.route('/onsite')
+def onsite():
+    active_workers = [w for w in DB['workers'] if w.get('status') == 'active']
+    return render_template('onsite.html', workers=active_workers)
+
+
+@app.route('/api/qr-info/<token>')
+def api_qr_info(token):
+    rec = _valid_token(token)
+    if not rec:
+        return jsonify({'ok': False, 'error': 'This QR code has expired. Ask your supervisor for a new one.'}), 410
+    return jsonify({'ok': True, 'site_id': rec['site_id'],
+                    'site_name': site_name(rec['site_id']),
+                    'action': rec['action']})
+
+
+@app.route('/api/scan-clock', methods=['POST'])
+def api_scan_clock():
+    d = request.get_json(force=True)
+    token = (d.get('token') or '').strip()
+    rec = _valid_token(token)
+    if not rec:
+        return jsonify({'ok': False, 'error': 'This QR code has expired. Ask your supervisor for a new one.'}), 410
+    worker_id = d.get('worker_id')
+    ok, info = _perform_clock(rec['site_id'], rec['action'], worker_id,
+                              d.get('lat'), d.get('lng'))
+    info['ok'] = ok
+    return jsonify(info), (200 if ok else 400)
+
+
+@app.route('/api/location', methods=['POST'])
+def api_location():
+    d = request.get_json(force=True)
+    worker_id = d.get('worker_id')
+    if not find('workers', worker_id):
+        return jsonify({'ok': False, 'error': 'Worker not found.'}), 404
+    if not open_timecard(worker_id):
+        return jsonify({'ok': False, 'error': 'Not clocked in.'})
+    try:
+        lat, lng = float(d.get('lat')), float(d.get('lng'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'Invalid coordinates.'}), 400
+    DB['live_locations'][worker_id] = {
+        'lat': lat, 'lng': lng, 'at': now_iso(),
+        'accuracy': d.get('accuracy'),
+    }
+    save_db()
+    return jsonify({'ok': True})
+
+
+LIVE_STALE_MIN = 15
+
+
+def _live_entry(worker_id):
+    loc = DB.get('live_locations', {}).get(worker_id)
+    if not loc:
+        return None
+    at = parse_iso(loc.get('at'))
+    if not at:
+        return None
+    age_min = (datetime.now() - at).total_seconds() / 60.0
+    if age_min > LIVE_STALE_MIN:
+        return None
+    return loc, age_min
+
+
+@app.route('/api/live-locations')
+def api_live_locations():
+    out = []
+    for t in DB['timecards']:
+        if t.get('status') != 'clocked_in':
+            continue
+        e = _live_entry(t['worker_id'])
+        if not e:
+            continue
+        loc, age_min = e
+        w = find('workers', t['worker_id']) or {}
+        out.append({'worker_id': t['worker_id'],
+                    'worker_name': w.get('name', '—'),
+                    'trade': w.get('trade', ''),
+                    'site_id': t['site_id'],
+                    'site_name': site_name(t['site_id']),
+                    'clock_in': t.get('clock_in'),
+                    'lat': loc['lat'], 'lng': loc['lng'],
+                    'at': loc['at'],
+                    'age_min': round(age_min, 1)})
+    return jsonify(out)
+
+
+@app.route('/api/worker-status/<worker_id>')
+def api_worker_status(worker_id):
+    w = find('workers', worker_id)
+    if not w:
+        abort(404)
+    t = open_timecard(worker_id)
+    tdy = today().isoformat()
+    today_hours = sum(
+        (x.get('hours') or compute_hours(x.get('clock_in'), x.get('clock_out')))
+        for x in DB['timecards']
+        if x['worker_id'] == worker_id and (x.get('clock_in') or '').startswith(tdy)
+        and x.get('clock_out'))
+    return jsonify({'worker_id': worker_id, 'worker_name': w['name'],
+                    'clocked_in': t is not None,
+                    'site_id': t['site_id'] if t else None,
+                    'site_name': site_name(t['site_id']) if t else None,
+                    'clock_in': t.get('clock_in') if t else None,
+                    'today_hours': round(today_hours, 2)})
+
+
+@app.route('/api/my-timecards/<worker_id>')
+def api_my_timecards(worker_id):
+    try:
+        days = max(1, min(90, int(request.args.get('days', 7))))
+    except (TypeError, ValueError):
+        days = 7
+    cutoff = (today() - timedelta(days=days - 1)).isoformat()
+    rows = []
+    for t in DB['timecards']:
+        if t['worker_id'] != worker_id:
+            continue
+        if (t.get('clock_in') or '')[:10] < cutoff:
+            continue
+        rows.append({'date': (t.get('clock_in') or '')[:10],
+                     'site_name': site_name(t.get('site_id')),
+                     'clock_in': fmt_dt(t.get('clock_in')),
+                     'clock_out': fmt_dt(t.get('clock_out')) if t.get('clock_out') else None,
+                     'hours': t.get('hours') or compute_hours(t.get('clock_in'), t.get('clock_out')),
+                     'status': t.get('status')})
+    rows.sort(key=lambda r: r['date'], reverse=True)
+    return jsonify(rows)
 
 
 # ================= TIMECARDS =================

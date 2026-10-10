@@ -22,7 +22,11 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
 COLLECTIONS = ['sites', 'workers', 'timecards', 'incidents', 'daily_logs',
                'labour', 'materials', 'defects', 'qa_checks', 'pins',
-               'plans', 'qr_tokens', 'snapshots', 'trash', 'dispatches']
+               'plans', 'qr_tokens', 'snapshots', 'trash', 'dispatches',
+               'patrol_punches']
+
+# Shared key for the patrol-board relay API (read-only punch feed).
+PATROL_API_KEY = os.environ.get('PATROL_API_KEY', 'ef2eaa7a03f346115f876731a1bd02ee')
 
 
 def new_id():
@@ -1442,3 +1446,79 @@ def api_dispatches():
         out.append({'worker': worker_name(d.get('worker_id')),
                     'message': d.get('message'), 'at': fmt_dt(d.get('created_at'))})
     return jsonify(out)
+
+
+# ================= PATROL CLOCK (public relay for patrol board QR) =================
+# Workers scan the QR on the patrol dashboard with their phones and clock in/out
+# here. The patrol board (private artifact) pulls punches via /api/patrol-punches
+# and keeps the durable payroll records.
+
+def _patrol_status_for(email):
+    """Return (clocked_in, since_iso) from the last punch for this email."""
+    email = (email or '').strip().lower()
+    last = None
+    for p in DB.get('patrol_punches', []):
+        if (p.get('email') or '').strip().lower() == email:
+            if last is None or (p.get('ts') or '') >= (last.get('ts') or ''):
+                last = p
+    if last and last.get('action') == 'in':
+        return True, last.get('ts')
+    return False, None
+
+
+@app.route('/patrol-clock')
+def patrol_clock():
+    return render_template('patrol_clock.html')
+
+
+@app.route('/api/patrol-status')
+def api_patrol_status():
+    email = request.args.get('email', '')
+    clocked_in, since = _patrol_status_for(email)
+    return jsonify({'email': email, 'clocked_in': clocked_in, 'since': since})
+
+
+@app.route('/api/patrol-punch', methods=['POST'])
+def api_patrol_punch():
+    d = request.get_json(force=True)
+    email = (d.get('email') or '').strip()
+    name = (d.get('name') or '').strip()
+    action = (d.get('action') or '').strip().lower()
+    if '@' not in email or '.' not in email.split('@')[-1]:
+        return jsonify({'ok': False, 'error': 'Enter a valid email address.'}), 400
+    if not name:
+        return jsonify({'ok': False, 'error': 'Enter your name.'}), 400
+    if action not in ('in', 'out'):
+        return jsonify({'ok': False, 'error': 'Invalid action.'}), 400
+    clocked_in, _ = _patrol_status_for(email)
+    if action == 'in' and clocked_in:
+        return jsonify({'ok': False, 'error': 'Already clocked in.'}), 400
+    if action == 'out' and not clocked_in:
+        return jsonify({'ok': False, 'error': 'Not clocked in.'}), 400
+    rec = {'id': new_id(), 'email': email, 'name': name,
+           'action': action, 'ts': now_iso()}
+    DB.setdefault('patrol_punches', []).append(rec)
+    save_db()
+    clocked_in, since = _patrol_status_for(email)
+    return jsonify({'ok': True, 'clocked_in': clocked_in, 'since': since})
+
+
+@app.route('/api/patrol-mine')
+def api_patrol_mine():
+    email = (request.args.get('email') or '').strip().lower()
+    rows = [p for p in DB.get('patrol_punches', [])
+            if (p.get('email') or '').strip().lower() == email]
+    rows.sort(key=lambda p: p.get('ts') or '', reverse=True)
+    return jsonify({'punches': rows[:30]})
+
+
+@app.route('/api/patrol-punches')
+def api_patrol_punches():
+    if request.args.get('key') != PATROL_API_KEY:
+        abort(403)
+    punches = sorted(DB.get('patrol_punches', []),
+                     key=lambda p: p.get('ts') or '')
+    since = request.args.get('since')
+    if since:
+        punches = [p for p in punches if (p.get('ts') or '') > since]
+    return jsonify({'punches': punches})

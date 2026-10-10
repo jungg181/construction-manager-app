@@ -107,9 +107,21 @@ async function loadPins(){
     const m = L.marker([p.lat, p.lng], {icon: dot(p.kind)}).bindPopup(`<b>${p.label}</b><br>${p.kind}<br><button onclick="delPin('${p.id}')">Delete pin</button>`);
     m._kind = p.kind; pinLayer.addLayer(m);
   });
-  if (layerState.personnel && (showAll || true)) {
+  if (layerState.personnel || showAll) {
     const people = await (await fetch(`/api/personnel?site_id=${SITE.id}`)).json();
+    const liveIds = new Set();
+    try {
+      const live = await (await fetch('/api/live-locations')).json();
+      live.filter(l => !SITE.id || l.site_id === SITE.id).forEach(l => {
+        liveIds.add(l.worker_id);
+        const ago = l.age_min < 1 ? 'just now' : `${Math.round(l.age_min)} min ago`;
+        L.marker([l.lat, l.lng], {icon: dot('personnel')})
+          .bindPopup(`<b>${l.worker_name}</b> 🟢<br>Live location · updated ${ago}<br>On site since ${l.clock_in ? l.clock_in.slice(5,16).replace('T',' ') : ''}`)
+          .addTo(pinLayer);
+      });
+    } catch(e) {}
     people.forEach(pp => {
+      if (liveIds.has(pp.worker_id)) return;  // live pin already shown
       L.marker([pp.lat, pp.lng], {icon: dot('personnel')}).bindPopup(`<b>${pp.worker}</b><br>On site since ${pp.since}`).addTo(pinLayer);
     });
   }
@@ -140,5 +152,6 @@ map.on('click', async e => {
 });
 if (SITE.lat != null) L.marker(center).addTo(map).bindPopup('Site center');
 loadPins();
+setInterval(loadPins, 60000);
 </script>
 {% endblock %}

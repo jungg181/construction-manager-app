@@ -46,6 +46,7 @@
       <span class="pill {% if w.clocked_in %}pill-active{% elif w.status=='active' %}pill-idle{% else %}pill-{{ w.status }}{% endif %}">
         {% if w.clocked_in %}Clocked In{% else %}{{ w.status.replace('_',' ').title() }}{% endif %}
       </span>
+      {% if w.clocked_in %}<span class="live-slot" data-wid="{{ w.id }}"></span>{% endif %}
       <span class="pill trade">{{ w.trade }}</span>
     </div>
     <div class="muted small">
@@ -120,5 +121,16 @@ async function openDetails(wid){
     <table class="tbl"><tr><th>Date</th><th>In–Out</th><th>Status</th><th>Hours</th></tr>${rows||'<tr><td colspan=4 class=muted>No timecards</td></tr>'}</table>`);
 }
 function siteName(id){ const m = {{ sites|map(attribute='id')|list|tojson }}; const n = {{ sites|map(attribute='name')|list|tojson }}; const i = m.indexOf(id); return i>=0?n[i]:'—'; }
+(async function(){
+  try {
+    const live = await (await fetch('/api/live-locations')).json();
+    const ids = new Set(live.map(l => l.worker_id));
+    document.querySelectorAll('.live-slot').forEach(s => {
+      if (ids.has(s.dataset.wid)) {
+        s.innerHTML = '<span class="pill pill-live"><span class="live-dot"></span>Live</span>';
+      }
+    });
+  } catch(e){}
+})();
 </script>
 {% endblock %}

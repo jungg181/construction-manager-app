@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clock {{ rec.action.replace('_',' ') if rec }} · Construction Manager</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="container narrow">
+{% if error %}
+  <div class="card"><div class="card-body" style="text-align:center">
+    <h2>⏱️ Attendance</h2>
+    <p class="muted">{{ error }}</p>
+  </div></div>
+{% else %}
+  <div class="card"><div class="card-body" style="text-align:center">
+    <h2>⏱️ {{ 'Clock In' if rec.action == 'clock_in' else 'Clock Out' }}</h2>
+    <p class="muted">{{ site.name if site else 'Unknown site' }}</p>
+    <form method="post" action="{{ url_for('clock_confirm', token=rec.token) }}" id="clock-form">
+      <label style="text-align:left">Select your name
+        <select name="worker_id" required>
+          <option value="">—</option>
+          {% for w in workers %}<option value="{{ w.id }}">{{ w.name }} ({{ w.trade }})</option>{% endfor %}
+        </select>
+      </label>
+      <input type="hidden" name="lat" id="lat"><input type="hidden" name="lng" id="lng">
+      <p class="muted small" id="geo-status">Getting your location...</p>
+      <button class="btn primary big" type="submit">Confirm {{ 'Clock In' if rec.action == 'clock_in' else 'Clock Out' }}</button>
+    </form>
+  </div></div>
+<script>
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    p => { document.getElementById('lat').value = p.coords.latitude;
+           document.getElementById('lng').value = p.coords.longitude;
+           document.getElementById('geo-status').textContent = '✓ Location captured'; },
+    () => { document.getElementById('geo-status').textContent = 'Location unavailable — you can still clock in/out.'; },
+    {timeout: 8000});
+} else { document.getElementById('geo-status').textContent = 'Geolocation not supported.'; }
+</script>
+{% endif %}
+</main>
+</body>
+</html>

@@ -83,6 +83,7 @@ textarea{resize:vertical}
 .pill-open,.pill-awaiting_signoff{background:#fef3c7;color:#92400e}
 .pill-resolved,.pill-signed_off{background:#dcfce7;color:#166534}
 .pill-on_leave{background:#ffedd5;color:#9a3412}
+.pill-offline{background:#e0e7ff;color:#3730a3}
 .pill-inactive{background:#e2e8f0;color:#475569}
 .pill.trade{background:#f1f5f9;color:#334155}
 

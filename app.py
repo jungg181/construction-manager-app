@@ -97,6 +97,14 @@ def load_db():
     db.setdefault('live_locations', {})  # worker_id -> {lat, lng, at, accuracy}
     for w in db.get('workers', []):
         w.setdefault('self_registered', False)
+    for t in db.get('qr_tokens', []):
+        # old tokens predate created_at: backfill as expires_at minus the
+        # 10-minute validity window so offline sync validation still works.
+        if not t.get('created_at'):
+            exp = parse_iso(t.get('expires_at'))
+            t['created_at'] = (exp - timedelta(minutes=10)).isoformat(timespec='seconds') if exp else now_iso()
+    for t in db.get('timecards', []):
+        t.setdefault('offline', False)
     return db
 
 
@@ -567,6 +575,7 @@ def api_qr_create():
     token = uuid.uuid4().hex
     rec = {'token': token, 'site_id': d.get('site_id'),
            'action': d.get('action', 'clock_in'),
+           'created_at': now_iso(),
            'expires_at': (datetime.now() + timedelta(minutes=10)).isoformat(timespec='seconds'),
            'clock_url': request.host_url.rstrip('/') + '/clock/' + token}
     DB['qr_tokens'] = [t for t in DB['qr_tokens'] if t['token'] != token]
@@ -610,13 +619,16 @@ def clock_page(token):
                            workers=active_workers, error=None)
 
 
-def _perform_clock(site_id, action, worker_id, lat, lng):
+def _perform_clock(site_id, action, worker_id, lat, lng, at_iso=None,
+                   offline=False):
     """Shared clock-in/out engine used by both the /clock page and the
-    On Site worker app API. Returns (ok, info dict)."""
+    On Site worker app API. at_iso overrides the timestamp (used for
+    offline-synced punches); offline marks the record as synced offline.
+    Returns (ok, info dict)."""
     w = find('workers', worker_id)
     if not w:
         return False, {'error': 'Worker not found.'}
-    now = now_iso()
+    now = at_iso or now_iso()
     if action == 'clock_in':
         if open_timecard(worker_id):
             return False, {'error': f"{w['name']} is already clocked in.",
@@ -624,7 +636,8 @@ def _perform_clock(site_id, action, worker_id, lat, lng):
         t = {'id': new_id(), 'worker_id': worker_id, 'site_id': site_id,
              'clock_in': now, 'clock_in_lat': lat, 'clock_in_lng': lng,
              'clock_out': None, 'clock_out_lat': None, 'clock_out_lng': None,
-             'hours': 0.0, 'status': 'clocked_in', 'notes': 'QR clock-in'}
+             'hours': 0.0, 'status': 'clocked_in', 'notes': 'QR clock-in',
+             'offline': offline}
         DB['timecards'].append(t)
         save_db()
         return True, {'action': 'clock_in', 'site_id': site_id,
@@ -638,11 +651,25 @@ def _perform_clock(site_id, action, worker_id, lat, lng):
     t['clock_out_lng'] = lng
     t['hours'] = compute_hours(t['clock_in'], now)
     t['status'] = 'clocked_out'
+    if offline:
+        t['offline'] = True
     save_db()
     return True, {'action': 'clock_out', 'site_id': t['site_id'],
                   'site_name': site_name(t['site_id']), 'worker_name': w['name'],
                   'clock_in': t['clock_in'], 'clock_out': now,
                   'hours': t['hours']}
+
+
+def _client_at_local_iso(s):
+    """Normalize a client-supplied ISO timestamp (usually UTC 'Z') to a
+    naive server-local ISO string so it compares/stores consistently with
+    the rest of the DB. Returns None if unparseable."""
+    dt = parse_iso(s)
+    if not dt:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.isoformat(timespec='seconds')
 
 
 @app.route('/clock/<token>/confirm', methods=['POST'])
@@ -815,6 +842,78 @@ def api_location():
     }
     save_db()
     return jsonify({'ok': True})
+
+
+@app.route('/sw.js')
+def service_worker():
+    """Serve the On Site service worker from the origin root so its
+    scope covers the whole app (not just /static/)."""
+    return send_file(os.path.join(BASE_DIR, 'static', 'sw.js'),
+                     mimetype='application/javascript')
+
+
+@app.route('/api/sync-clock', methods=['POST'])
+def api_sync_clock():
+    """Accept a clock action captured offline. The QR token is validated
+    against the CLIENT timestamp: created_at <= client_at <= expires_at,
+    i.e. the scan must have happened while the QR was valid. The timecard
+    is stamped with the client time and flagged offline=True."""
+    d = request.get_json(force=True)
+    token = (d.get('token') or '').strip()
+    rec = next((t for t in DB['qr_tokens'] if t['token'] == token), None)
+    if not rec:
+        return jsonify({'ok': False,
+                        'error': 'QR code not recognized.'}), 410
+    client_at = _client_at_local_iso(d.get('client_at'))
+    if not client_at:
+        return jsonify({'ok': False,
+                        'error': 'Missing scan time.'}), 400
+    created = parse_iso(rec.get('created_at'))
+    expires = parse_iso(rec.get('expires_at'))
+    if not created or not expires or not (created <= parse_iso(client_at) <= expires):
+        return jsonify({'ok': False,
+                        'error': 'QR expired before the scan.'}), 410
+    worker_id = d.get('worker_id')
+    if not find('workers', worker_id):
+        return jsonify({'ok': False, 'error': 'Worker not found.'}), 400
+    # Offline the worker picks the action manually (the QR can't be read
+    # for its action), so it comes from the request, not the token.
+    action = d.get('action')
+    if action not in ('clock_in', 'clock_out'):
+        return jsonify({'ok': False, 'error': 'Invalid action.'}), 400
+    ok, info = _perform_clock(rec['site_id'], action, worker_id,
+                              d.get('lat'), d.get('lng'),
+                              at_iso=client_at, offline=True)
+    info['ok'] = ok
+    return jsonify(info), (200 if ok else 400)
+
+
+@app.route('/api/location-batch', methods=['POST'])
+def api_location_batch():
+    """Accept a batch of location points captured offline. Updates the
+    worker's live location with the newest point."""
+    d = request.get_json(force=True)
+    worker_id = d.get('worker_id')
+    if not find('workers', worker_id):
+        return jsonify({'ok': False, 'error': 'Worker not found.'}), 404
+    if not open_timecard(worker_id):
+        return jsonify({'ok': False, 'error': 'Not clocked in.'})
+    points = d.get('points') or []
+    accepted = 0
+    newest = None
+    for p in points:
+        try:
+            lat, lng = float(p.get('lat')), float(p.get('lng'))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        at = _client_at_local_iso(p.get('at')) or now_iso()
+        newest = {'lat': lat, 'lng': lng, 'at': at,
+                  'accuracy': p.get('accuracy')}
+        accepted += 1
+    if newest:
+        DB['live_locations'][worker_id] = newest
+        save_db()
+    return jsonify({'ok': True, 'accepted': accepted})
 
 
 LIVE_STALE_MIN = 15

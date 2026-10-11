@@ -50,3 +50,27 @@ Admin side: the Map & Plans **Active Personnel** layer shows 🟢 live pins
 ("updated X min ago", refreshed every 60s), falling back to clock-in GPS pins
 when a worker is not sharing. The Workers tab shows a pulsing **● Live**
 badge next to clocked-in workers who shared a position within 15 minutes.
+
+### Offline support
+
+Construction sites often have no internet. The On Site app keeps working:
+
+- A service worker (`/sw.js`) caches the app page, stylesheet, and the QR
+  scanner library after the first online load, so `/onsite` opens offline.
+- An **Offline** banner appears when the phone loses connection.
+- **Offline clock:** scanning a QR offline shows Clock In / Clock Out buttons
+  (the worker picks the action, since the QR can't be validated). The action
+  is queued in the phone with the scan's local timestamp and GPS. On
+  reconnect it syncs via `POST /api/sync-clock`; the server only accepts it
+  if the scan happened while the QR was valid (`created_at <= client_at <=
+  expires_at`) — a scan of an already-expired QR is rejected. Synced records
+  get an **Offline** badge in the admin Timecards table and use the phone's
+  timestamp, not the sync time.
+- **Offline locations:** while sharing is on but offline, positions are
+  buffered on the phone (up to 500, oldest dropped) and uploaded in one
+  batch (`POST /api/location-batch`) on reconnect.
+- Registration is online-only (one-time): offline with no registered identity
+  shows "Connect to the internet once to register".
+
+Note: the server clock and the phone clock should be roughly in sync;
+the QR validity window is checked against the phone's scan timestamp.

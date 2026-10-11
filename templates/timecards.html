@@ -44,7 +44,7 @@
   <td>{{ fmt_dt(t.clock_in) }}{% set gl=gmaps_link(t.clock_in_lat,t.clock_in_lng) %}{% if gl %}<br><a target="_blank" href="{{ gl }}" class="small">📍 GPS</a>{% endif %}</td>
   <td>{% if t.clock_out %}{{ fmt_dt(t.clock_out) }}{% set gl=gmaps_link(t.clock_out_lat,t.clock_out_lng) %}{% if gl %}<br><a target="_blank" href="{{ gl }}" class="small">📍 GPS</a>{% endif %}{% else %}<span class="muted">Still on shift</span>{% endif %}</td>
   <td>{{ t.hours or compute_hours(t.clock_in, t.clock_out) }}</td>
-  <td><span class="pill pill-{{ t.status }}">{{ t.status.replace('_',' ').title() }}</span></td>
+  <td><span class="pill pill-{{ t.status }}">{{ t.status.replace('_',' ').title() }}</span>{% if t.offline %} <span class="pill pill-offline" title="Synced from an offline device">Offline</span>{% endif %}</td>
   <td class="small muted">{{ t.notes or '' }}</td>
   <td class="nowrap">
     {% if t.status == 'clocked_out' %}

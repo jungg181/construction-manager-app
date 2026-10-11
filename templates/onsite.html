@@ -39,6 +39,7 @@
 
 <main class="container narrow">
   <div id="flash"></div>
+  <div id="offline-bar" class="hidden" style="background:#fef3c7;color:#92400e;border:1px solid #fcd34d;border-radius:10px;padding:8px 12px;margin:10px 0;font-size:.85rem;font-weight:700">📡 Offline — clock actions and locations will sync when reconnected.</div>
 
   <div class="card" id="register-card" style="margin-top:12px"><div class="card-body">
     <h3 style="margin-top:0">Register your phone</h3>
@@ -91,9 +92,14 @@
     <p><b>Site:</b> <span id="cf-site"></span><br>
        <b>Worker:</b> <span id="cf-worker"></span></p>
     <p class="muted small" id="cf-geo">Getting your location...</p>
-    <div class="row-actions">
+    <div class="row-actions" id="cf-online-actions">
       <button class="btn primary big" id="cf-confirm" onclick="confirmClock()">Confirm</button>
       <button class="btn big" onclick="cancelConfirm()">Cancel</button>
+    </div>
+    <div class="row-actions hidden" id="cf-offline-actions">
+      <button class="btn primary big" onclick="confirmClockOffline('clock_in')">Clock In</button>
+      <button class="btn big" onclick="confirmClockOffline('clock_out')">Clock Out</button>
+      <button class="btn" onclick="cancelConfirm()">Cancel</button>
     </div>
   </div>
 
@@ -116,6 +122,69 @@ const $ = id => document.getElementById(id);
 const LS_KEY = 'onsite_worker_id';
 const NAME_KEY = 'onsite_worker_name';
 let pendingToken = null, scanner = null, locTimer = null, curWorker = null;
+
+/* ---------- offline support ---------- */
+const QUEUE_KEY = 'pendingClockActions';
+const LOCQ_KEY = 'pendingLocations';
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
+function isOnline(){ return navigator.onLine; }
+function loadQueue(key){
+  try { const v = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(v) ? v : []; }
+  catch(e){ return []; }
+}
+function saveQueue(key, arr){ localStorage.setItem(key, JSON.stringify(arr)); }
+function updateOfflineBar(){
+  $('offline-bar').classList.toggle('hidden', isOnline());
+}
+window.addEventListener('online', () => {
+  updateOfflineBar();
+  flushQueue();
+  flushLocations();
+});
+window.addEventListener('offline', updateOfflineBar);
+setInterval(() => { flushQueue(); flushLocations(); }, 30000);
+
+async function flushQueue(){
+  if (!isOnline()) return;
+  const q = loadQueue(QUEUE_KEY);
+  if (!q.length) return;
+  const remaining = [];
+  let synced = 0;
+  const errors = [];
+  for (const item of q) {
+    try {
+      const r = await fetch('/api/sync-clock', {method:'POST',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(item)});
+      const d = await r.json();
+      if (d.ok) { synced++; }
+      else { errors.push(d.error || 'Sync failed.'); }
+      // Any server response (ok or rejected) drops the item — only a
+      // network failure keeps it queued for the next attempt.
+    } catch(e) {
+      remaining.push(item);
+    }
+  }
+  saveQueue(QUEUE_KEY, remaining);
+  if (synced) msg(`✓ Synced ${synced} offline clock action${synced > 1 ? 's' : ''}.`, 'ok');
+  if (errors.length) msg('⚠ ' + errors[0] + (errors.length > 1 ? ` (+${errors.length - 1} more)` : ''), 'err');
+  if (synced || errors.length) refreshAll();
+}
+
+async function flushLocations(){
+  if (!isOnline() || !curWorker) return;
+  const q = loadQueue(LOCQ_KEY);
+  if (!q.length) return;
+  try {
+    const r = await fetch('/api/location-batch', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({worker_id: curWorker, points: q})});
+    const d = await r.json();
+    if (d.ok) saveQueue(LOCQ_KEY, []);
+  } catch(e) { /* keep for next attempt */ }
+}
 
 function msg(html, kind){
   $('flash').innerHTML = `<div class="msg ${kind}">${html}</div>`;
@@ -145,18 +214,27 @@ function enterMain(id, name){
 }
 
 async function initWorker(){
+  updateOfflineBar();
   const saved = localStorage.getItem(LS_KEY);
   if (saved) {
-    const r = await fetch('/api/worker-status/' + saved);
-    if (r.ok) {
-      const d = await r.json();
-      enterMain(saved, d.worker_name);
+    try {
+      const r = await fetch('/api/worker-status/' + saved);
+      if (r.ok) {
+        const d = await r.json();
+        enterMain(saved, d.worker_name);
+        return;
+      }
+      // worker deleted by admin — drop the stored identity
+      localStorage.removeItem(LS_KEY);
+      localStorage.removeItem(NAME_KEY);
+    } catch(e) {
+      // offline: trust the stored identity so clocking still works
+      enterMain(saved, localStorage.getItem(NAME_KEY) || 'Worker');
       return;
     }
-    localStorage.removeItem(LS_KEY);
-    localStorage.removeItem(NAME_KEY);
   }
   showRegister();
+  if (!isOnline()) regMsg('You are offline — connect to the internet once to register this phone.', 'info');
 }
 
 function regMsg(html, kind){
@@ -169,6 +247,7 @@ async function registerWorker(){
   const email = $('reg-email').value.trim();
   if (!name || !phone) { regMsg('Name and mobile phone are required.', 'err'); return; }
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { regMsg('Enter a valid email address.', 'err'); return; }
+  if (!isOnline()) { regMsg('You are offline — registration needs the internet once.', 'err'); return; }
   regMsg('Registering...', 'info');
   try {
     const r = await fetch('/api/register-worker', {method:'POST',
@@ -201,16 +280,19 @@ async function refreshAll(){
 }
 
 async function refreshStatus(){
-  const r = await fetch('/api/worker-status/' + curWorker);
-  if (!r.ok) {
-    // worker may have been deleted by the admin — back to registration
-    curWorker = null;
-    localStorage.removeItem(LS_KEY);
-    localStorage.removeItem(NAME_KEY);
-    showRegister();
-    return;
-  }
-  const d = await r.json();
+  let d;
+  try {
+    const r = await fetch('/api/worker-status/' + curWorker);
+    if (!r.ok) {
+      // worker may have been deleted by the admin — back to registration
+      curWorker = null;
+      localStorage.removeItem(LS_KEY);
+      localStorage.removeItem(NAME_KEY);
+      showRegister();
+      return;
+    }
+    d = await r.json();
+  } catch(e) { return; } // offline — keep the last rendered status
   const c = $('status-card');
   if (d.clocked_in) {
     c.innerHTML = `<div class="status-big">🟢 Clocked in</div>
@@ -226,9 +308,12 @@ async function refreshStatus(){
 }
 
 async function refreshTimecards(){
-  const r = await fetch('/api/my-timecards/' + curWorker + '?days=7');
-  if (!r.ok) return;
-  const rows = await r.json();
+  let rows;
+  try {
+    const r = await fetch('/api/my-timecards/' + curWorker + '?days=7');
+    if (!r.ok) return;
+    rows = await r.json();
+  } catch(e) { return; } // offline — keep the last rendered list
   $('tc-list').innerHTML = rows.length ? rows.map(t =>
     `<div class="tc-row"><span><b>${t.date}</b> · ${t.site_name}<br>
      <span class="muted small">${t.clock_in}${t.clock_out ? ' – ' + t.clock_out : ' – on shift'} · ${t.status.replace('_',' ')}</span></span>
@@ -277,17 +362,9 @@ function useManualToken(){
 }
 
 let pendingGeo = null;
-async function prepareConfirm(token){
-  const r = await fetch('/api/qr-info/' + encodeURIComponent(token));
-  const d = await r.json();
-  if (!r.ok || !d.ok) { msg(d.error || 'Invalid or expired QR code.', 'err'); return; }
-  pendingToken = token;
-  $('cf-title').textContent = d.action === 'clock_in' ? '⏱️ Clock In' : '⏱️ Clock Out';
-  $('cf-site').textContent = d.site_name;
-  $('cf-worker').textContent = workerName();
-  $('cf-geo').textContent = 'Getting your location...';
-  $('confirm-box').classList.remove('hidden');
+function captureGeo(){
   pendingGeo = null;
+  $('cf-geo').textContent = 'Getting your location...';
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       p => { pendingGeo = {lat: p.coords.latitude, lng: p.coords.longitude};
@@ -295,11 +372,49 @@ async function prepareConfirm(token){
       () => { $('cf-geo').textContent = 'Location unavailable — you can still continue.'; },
       {enableHighAccuracy: true, timeout: 10000});
   } else { $('cf-geo').textContent = 'Geolocation not supported.'; }
+}
+async function prepareConfirm(token){
+  pendingToken = token;
+  $('confirm-box').classList.remove('hidden');
+  $('cf-worker').textContent = workerName();
+  if (!isOnline()) {
+    // Offline: the token can't be validated, so the worker picks the
+    // action manually. It's queued and validated on sync.
+    $('cf-title').textContent = '⏱️ Offline clock';
+    $('cf-site').textContent = 'Will sync when reconnected';
+    $('cf-online-actions').classList.add('hidden');
+    $('cf-offline-actions').classList.remove('hidden');
+    captureGeo();
+    window.scrollTo(0, 0);
+    return;
+  }
+  const r = await fetch('/api/qr-info/' + encodeURIComponent(token));
+  const d = await r.json();
+  if (!r.ok || !d.ok) { msg(d.error || 'Invalid or expired QR code.', 'err'); cancelConfirm(); return; }
+  $('cf-title').textContent = d.action === 'clock_in' ? '⏱️ Clock In' : '⏱️ Clock Out';
+  $('cf-site').textContent = d.site_name;
+  $('cf-online-actions').classList.remove('hidden');
+  $('cf-offline-actions').classList.add('hidden');
+  captureGeo();
   window.scrollTo(0, 0);
 }
 function cancelConfirm(){
   pendingToken = null; pendingGeo = null;
   $('confirm-box').classList.add('hidden');
+  $('cf-online-actions').classList.remove('hidden');
+  $('cf-offline-actions').classList.add('hidden');
+}
+
+function confirmClockOffline(action){
+  if (!pendingToken || !curWorker) return;
+  const q = loadQueue(QUEUE_KEY);
+  q.push({token: pendingToken, worker_id: curWorker, action: action,
+          client_at: new Date().toISOString(),
+          lat: pendingGeo ? pendingGeo.lat : null,
+          lng: pendingGeo ? pendingGeo.lng : null});
+  saveQueue(QUEUE_KEY, q);
+  cancelConfirm();
+  msg('✓ Saved offline — will sync automatically when reconnected.', 'ok');
 }
 
 async function confirmClock(){
@@ -327,6 +442,12 @@ $('loc-toggle').onchange = () => {
   if ($('loc-toggle').checked) startLocSharing();
   else stopLocSharing();
 };
+function bufferLocation(pos){
+  const q = loadQueue(LOCQ_KEY);
+  q.push({lat: pos.lat, lng: pos.lng, at: new Date().toISOString(), accuracy: pos.accuracy});
+  while (q.length > 500) q.shift(); // cap: drop oldest
+  saveQueue(LOCQ_KEY, q);
+}
 async function sendLocation(){
   if (!curWorker) return;
   const pos = await new Promise(res => {
@@ -336,6 +457,12 @@ async function sendLocation(){
       () => res(null), {enableHighAccuracy: true, timeout: 10000});
   });
   if (!pos) { $('loc-hint').textContent = 'Location unavailable — retrying in a minute.'; return; }
+  if (!isOnline()) {
+    bufferLocation(pos);
+    const n = loadQueue(LOCQ_KEY).length;
+    $('loc-hint').textContent = `Offline — ${n} location${n > 1 ? 's' : ''} stored, will sync later.`;
+    return;
+  }
   const r = await fetch('/api/location', {method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({worker_id: curWorker, lat: pos.lat, lng: pos.lng, accuracy: pos.accuracy})});
